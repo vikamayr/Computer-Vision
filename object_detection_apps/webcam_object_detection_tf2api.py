@@ -119,8 +119,8 @@ while True:
           detections['detection_scores'][0].numpy(),
           category_index,
           use_normalized_coordinates=True,
-          max_boxes_to_draw=200,
-          min_score_thresh=.30,
+          max_boxes_to_draw=10,
+          min_score_thresh=.70,
           agnostic_mode=False)
 
     # Display output
