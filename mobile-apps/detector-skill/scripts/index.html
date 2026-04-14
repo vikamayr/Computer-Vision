@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<meta http-equiv="X-UA-Compatible" content="ie=edge">
+		<title>Detector Skill Runner</title>
+	</head>
+	<body>
+		<script>
+			function clampNumber(value, min, max, fallback) {
+				const num = Number(value);
+				if (Number.isNaN(num)) return fallback;
+				return Math.min(max, Math.max(min, num));
+			}
+
+			function normalizeTargets(targets) {
+				const arr = Array.isArray(targets) ? targets : ['human', 'animal'];
+				const normalized = arr
+					.map((x) => String(x || '').toLowerCase().trim())
+					.filter((x) => x === 'human' || x === 'animal');
+				return normalized.length > 0 ? Array.from(new Set(normalized)) : ['human', 'animal'];
+			}
+
+			window['ai_edge_gallery_get_result'] = async (dataStr) => {
+				try {
+					const input = JSON.parse(dataStr || '{}');
+					const mode = String(input.mode || 'live_detect');
+					if (mode !== 'live_detect') {
+						throw new Error("Unsupported mode. Use 'live_detect'.");
+					}
+
+					const config = {
+						mode,
+						targets: normalizeTargets(input.targets),
+						min_confidence: clampNumber(input.min_confidence, 0, 1, 0.45),
+						max_fps: clampNumber(input.max_fps, 1, 10, 5),
+						gemma_assist: input.gemma_assist !== false,
+						facing_mode: ['environment', 'user'].includes(String(input.facing_mode || '').toLowerCase())
+							? String(input.facing_mode).toLowerCase()
+							: 'environment'
+					};
+
+					const encoded = encodeURIComponent(JSON.stringify(config));
+
+					return JSON.stringify({
+						result: config.gemma_assist
+							? `Live detector ready. Targets: ${config.targets.join(', ')}. Open preview card. For deeper Gemma analysis, use Copy JSON in the preview and paste it back to chat.`
+							: `Live detector ready. Targets: ${config.targets.join(', ')}. Open the preview card to start camera detection.`,
+						webview: {
+							url: `webview.html?config=${encoded}&v=${Date.now()}`,
+							aspectRatio: 0.5625
+						}
+					});
+				} catch (e) {
+					return JSON.stringify({
+						error: `Failed to start detector skill: ${e.message}`
+					});
+				}
+			};
+		</script>
+	</body>
+</html>

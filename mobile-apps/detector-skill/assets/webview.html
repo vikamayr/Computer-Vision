@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Human & Animal Detector</title>
+    <style>
+      :root {
+        --bg: #05070d;
+        --fg: #e9edf8;
+        --muted: #98a2b3;
+        --cyan: #33d5ff;
+        --lime: #a7f432;
+        --panel: rgba(8, 12, 20, 0.75);
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: Inter, Roboto, "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+
+      #stage {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        background: #000;
+      }
+
+      video,
+      canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      #overlay {
+        pointer-events: none;
+      }
+
+      .hud {
+        position: fixed;
+        left: 12px;
+        right: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        z-index: 20;
+      }
+
+      .top {
+        top: 12px;
+      }
+
+      .bottom {
+        bottom: 12px;
+      }
+
+      .pill {
+        background: var(--panel);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        padding: 8px 12px;
+        font-size: 12px;
+        line-height: 1;
+        backdrop-filter: blur(8px);
+      }
+
+      .btn {
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        background: rgba(18, 25, 40, 0.85);
+        color: var(--fg);
+        border-radius: 999px;
+        padding: 10px 14px;
+        font-size: 12px;
+      }
+
+      .btn.small {
+        padding: 8px 12px;
+        font-size: 11px;
+      }
+
+      .btn:active {
+        transform: scale(0.98);
+      }
+
+      #summary {
+        max-width: 78%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      #error {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(90vw, 420px);
+        text-align: center;
+        font-size: 14px;
+        color: #ff9f9f;
+        background: rgba(30, 8, 8, 0.82);
+        border: 1px solid rgba(255, 120, 120, 0.45);
+        border-radius: 12px;
+        padding: 14px;
+        z-index: 30;
+        display: none;
+      }
+
+      #legend {
+        display: flex;
+        gap: 8px;
+      }
+
+      .dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        margin-right: 6px;
+      }
+
+      .human {
+        background: var(--cyan);
+      }
+
+      .animal {
+        background: var(--lime);
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      #toast {
+        position: fixed;
+        left: 50%;
+        bottom: 74px;
+        transform: translateX(-50%);
+        z-index: 40;
+        background: rgba(8, 12, 20, 0.95);
+        color: var(--fg);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 999px;
+        padding: 8px 12px;
+        font-size: 12px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+      }
+
+      #toast.show {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="hud top">
+      <div class="pill" id="status">initializing</div>
+      <div class="pill" id="legend">
+        <span><span class="dot human"></span>human</span>
+        <span><span class="dot animal"></span>animal</span>
+      </div>
+    </div>
+
+    <div class="hud bottom">
+      <div class="pill" id="summary">Preparing camera…</div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn small" id="copySummary">Copy summary</button>
+        <button class="btn small" id="copyJson">Copy JSON</button>
+        <button class="btn" id="toggle">Pause</button>
+        <button class="btn" id="switchCamera">Switch</button>
+      </div>
+    </div>
+
+    <div id="error"></div>
+    <div id="toast">Copied</div>
+
+    <script type="module">
+      import {
+        ObjectDetector,
+        FilesetResolver
+      } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+      const ANIMAL_LABELS = new Set([
+        "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"
+      ]);
+
+      const state = {
+        config: {
+          targets: ["human", "animal"],
+          min_confidence: 0.45,
+          max_fps: 5,
+          facing_mode: "environment",
+          gemma_assist: true
+        },
+        running: true,
+        status: "initializing",
+        detector: null,
+        stream: null,
+        lastRunAt: 0,
+        latestPayload: null,
+        payloadHistory: [],
+        modelInfo: "mediapipe-object-detector"
+      };
+
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("overlay");
+      const ctx = canvas.getContext("2d");
+      const statusEl = document.getElementById("status");
+      const summaryEl = document.getElementById("summary");
+      const errorEl = document.getElementById("error");
+      const toastEl = document.getElementById("toast");
+      const toggleBtn = document.getElementById("toggle");
+      const switchBtn = document.getElementById("switchCamera");
+      const copySummaryBtn = document.getElementById("copySummary");
+      const copyJsonBtn = document.getElementById("copyJson");
+
+      let toastTimer = null;
+
+      function showToast(text) {
+        toastEl.textContent = text;
+        toastEl.classList.add("show");
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          toastEl.classList.remove("show");
+        }, 1300);
+      }
+
+      async function copyText(text, okMessage) {
+        try {
+          await navigator.clipboard.writeText(text);
+          showToast(okMessage);
+        } catch (e) {
+          showToast("Copy failed");
+          console.warn("Copy failed", e);
+        }
+      }
+
+      function parseConfig() {
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const raw = params.get("config");
+          if (!raw) return;
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed.targets)) {
+            state.config.targets = parsed.targets
+              .map((x) => String(x).toLowerCase())
+              .filter((x) => x === "human" || x === "animal");
+            if (state.config.targets.length === 0) {
+              state.config.targets = ["human", "animal"];
+            }
+          }
+          state.config.min_confidence = Math.max(0, Math.min(1, Number(parsed.min_confidence ?? 0.45)));
+          state.config.max_fps = Math.max(1, Math.min(10, Number(parsed.max_fps ?? 5)));
+          state.config.facing_mode = parsed.facing_mode === "user" ? "user" : "environment";
+          state.config.gemma_assist = parsed.gemma_assist !== false;
+        } catch (e) {
+          console.warn("Failed to parse config", e);
+        }
+      }
+
+      function setStatus(s) {
+        state.status = s;
+        statusEl.textContent = s;
+      }
+
+      function showError(message) {
+        errorEl.style.display = "block";
+        errorEl.textContent = message;
+        setStatus("error");
+      }
+
+      function hideError() {
+        errorEl.style.display = "none";
+      }
+
+      function resizeCanvasToVideo() {
+        const vw = video.videoWidth || 1280;
+        const vh = video.videoHeight || 720;
+        canvas.width = vw;
+        canvas.height = vh;
+      }
+
+      function clearOverlay() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+
+      function classifyLabel(rawLabel) {
+        const l = String(rawLabel || "").toLowerCase();
+        if (l === "person") return { accepted: state.config.targets.includes("human"), classType: "human", label: "human" };
+        if (ANIMAL_LABELS.has(l)) return { accepted: state.config.targets.includes("animal"), classType: "animal", label: l };
+        return { accepted: false, classType: "other", label: l };
+      }
+
+      function toNormalizedBox(bbox, imageWidth, imageHeight) {
+        const x = Math.max(0, bbox.originX || 0);
+        const y = Math.max(0, bbox.originY || 0);
+        const w = Math.max(0, bbox.width || 0);
+        const h = Math.max(0, bbox.height || 0);
+
+        return {
+          x: Math.min(1, x / imageWidth),
+          y: Math.min(1, y / imageHeight),
+          w: Math.min(1, w / imageWidth),
+          h: Math.min(1, h / imageHeight)
+        };
+      }
+
+      function drawDetections(detections) {
+        clearOverlay();
+        ctx.lineWidth = 3;
+        ctx.font = "16px Inter, sans-serif";
+
+        for (const d of detections) {
+          const color = d.label === "human" ? "#33d5ff" : "#a7f432";
+          const x = d.bbox.x * canvas.width;
+          const y = d.bbox.y * canvas.height;
+          const w = d.bbox.w * canvas.width;
+          const h = d.bbox.h * canvas.height;
+
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.rect(x, y, w, h);
+          ctx.stroke();
+
+          const tag = `${d.label} ${(d.confidence * 100).toFixed(0)}%`;
+          const textPad = 6;
+          const textW = ctx.measureText(tag).width + textPad * 2;
+          const textH = 22;
+          const tx = x;
+          const ty = Math.max(0, y - textH);
+
+          ctx.fillRect(tx, ty, textW, textH);
+          ctx.fillStyle = "#071017";
+          ctx.fillText(tag, tx + textPad, ty + 16);
+        }
+      }
+
+      function summarize(detections) {
+        if (!detections.length) return "No humans/animals detected";
+
+        let humanCount = 0;
+        const animalMap = new Map();
+        for (const d of detections) {
+          if (d.label === "human") {
+            humanCount += 1;
+          } else {
+            animalMap.set(d.label, (animalMap.get(d.label) || 0) + 1);
+          }
+        }
+
+        const chunks = [];
+        if (humanCount > 0) chunks.push(`${humanCount} human${humanCount > 1 ? "s" : ""}`);
+        for (const [name, c] of animalMap.entries()) {
+          chunks.push(`${c} ${name}${c > 1 ? "s" : ""}`);
+        }
+        return `Detected ${chunks.join(", ")}`;
+      }
+
+      function buildGemmaSummaryText() {
+        const payload = state.latestPayload;
+        if (!payload) return "No detection payload available yet.";
+        return [
+          "Analyze this camera detection snapshot.",
+          `Status: ${state.status}`,
+          `Summary: ${summarize(payload.detections)}`,
+          `Detections count: ${payload.detections.length}`,
+          "Payload JSON:",
+          JSON.stringify(payload)
+        ].join("\n");
+      }
+
+      function storePayload(payload) {
+        state.payloadHistory.push(payload);
+        if (state.payloadHistory.length > 20) {
+          state.payloadHistory.shift();
+        }
+      }
+
+      async function detectWithMediapipe(now) {
+        const result = await state.detector.detectForVideo(video, now);
+        const imageWidth = video.videoWidth || 1;
+        const imageHeight = video.videoHeight || 1;
+
+        const filtered = [];
+        for (const obj of result.detections || []) {
+          const topCategory = (obj.categories || [])[0];
+          if (!topCategory) continue;
+
+          const confidence = Number(topCategory.score || 0);
+          if (confidence < state.config.min_confidence) continue;
+
+          const c = classifyLabel(topCategory.categoryName);
+          if (!c.accepted) continue;
+
+          filtered.push({
+            label: c.label,
+            confidence,
+            bbox: toNormalizedBox(obj.boundingBox || {}, imageWidth, imageHeight)
+          });
+        }
+
+        return {
+          timestamp_ms: Date.now(),
+          adapter: state.modelInfo,
+          image: {
+            width: imageWidth,
+            height: imageHeight
+          },
+          detections: filtered
+        };
+      }
+
+      async function runDetectionAdapter(now) {
+        // Adapter seam for future Gemma 4 multimodal integration.
+        // Keep canonical payload shape stable for UI + downstream parsing.
+        return detectWithMediapipe(now);
+      }
+
+      async function detectFrame() {
+        const now = performance.now();
+        const frameInterval = 1000 / state.config.max_fps;
+        if (!state.running || now - state.lastRunAt < frameInterval) {
+          requestAnimationFrame(detectFrame);
+          return;
+        }
+
+        state.lastRunAt = now;
+
+        try {
+          state.latestPayload = await runDetectionAdapter(now);
+          storePayload(state.latestPayload);
+
+          drawDetections(state.latestPayload.detections);
+          summaryEl.textContent = summarize(state.latestPayload.detections);
+
+          console.log("detector_payload", JSON.stringify(state.latestPayload));
+
+          setStatus("running");
+        } catch (e) {
+          console.warn("Detection frame failed", e);
+          setStatus("running");
+        }
+
+        requestAnimationFrame(detectFrame);
+      }
+
+      async function loadDetector() {
+        setStatus("initializing");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+
+        state.detector = await ObjectDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite"
+          },
+          scoreThreshold: state.config.min_confidence,
+          runningMode: "VIDEO",
+          maxResults: 10
+        });
+      }
+
+      async function startCamera() {
+        setStatus("initializing");
+
+        state.stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: state.config.facing_mode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+
+        video.srcObject = state.stream;
+        await video.play();
+
+        if (state.config.facing_mode === "user") {
+          video.style.transform = "scaleX(-1)";
+          canvas.style.transform = "scaleX(-1)";
+        } else {
+          video.style.transform = "none";
+          canvas.style.transform = "none";
+        }
+
+        resizeCanvasToVideo();
+      }
+
+      function stopCameraTracks() {
+        if (!state.stream) return;
+        for (const track of state.stream.getTracks()) {
+          track.stop();
+        }
+        state.stream = null;
+      }
+
+      async function restartWithFacingMode(nextMode) {
+        try {
+          state.config.facing_mode = nextMode;
+          stopCameraTracks();
+          await startCamera();
+        } catch (e) {
+          showError(`Failed to switch camera: ${e.message}`);
+        }
+      }
+
+      toggleBtn.addEventListener("click", () => {
+        state.running = !state.running;
+        toggleBtn.textContent = state.running ? "Pause" : "Resume";
+        if (!state.running) {
+          setStatus("paused");
+          summaryEl.textContent = "Detection paused";
+        } else {
+          setStatus("running");
+        }
+      });
+
+      switchBtn.addEventListener("click", async () => {
+        const next = state.config.facing_mode === "environment" ? "user" : "environment";
+        await restartWithFacingMode(next);
+      });
+
+      copySummaryBtn.addEventListener("click", async () => {
+        await copyText(buildGemmaSummaryText(), "Summary copied");
+      });
+
+      copyJsonBtn.addEventListener("click", async () => {
+        if (!state.latestPayload) {
+          showToast("No payload yet");
+          return;
+        }
+        const exportObj = {
+          detector: state.modelInfo,
+          config: state.config,
+          latest: state.latestPayload,
+          recent: state.payloadHistory.slice(-5)
+        };
+        await copyText(JSON.stringify(exportObj), "JSON copied");
+      });
+
+      window.addEventListener("resize", resizeCanvasToVideo);
+
+      async function boot() {
+        parseConfig();
+        hideError();
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          showError("Camera API is not available in this environment.");
+          return;
+        }
+
+        try {
+          await loadDetector();
+          await startCamera();
+          summaryEl.textContent = state.config.gemma_assist
+            ? "Detector ready • use Copy JSON for Gemma analysis"
+            : "Detector ready";
+          requestAnimationFrame(detectFrame);
+        } catch (e) {
+          if (String(e.message || "").toLowerCase().includes("permission")) {
+            setStatus("permission_denied");
+          }
+          showError(`Detector init failed: ${e.message}`);
+        }
+      }
+
+      boot();
+    </script>
+  </body>
+</html>
